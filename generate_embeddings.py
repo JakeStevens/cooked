@@ -1,10 +1,35 @@
 import sqlite3
-import random
 import json
+from types import Recipe
+from embedding_generator import generate_embedding_vector, QwenEmbeddingModel
 
-def generate_random_embedding_vector(dimensions=32):
-    """Generates a list of 'dimensions' random floating-point numbers between 0.0 and 1.0."""
-    return [random.random() for _ in range(dimensions)]
+def create_recipe_from_db(cursor, recipe_id: int) -> Recipe:
+    """Create a Recipe object from database data."""
+    cursor.execute("""
+        SELECT id, name, ingredients, instructions, description, cuisine_type,
+               prep_time, cook_time, total_time, servings
+        FROM recipes_table WHERE id = ?
+    """, (recipe_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Recipe with id {recipe_id} not found")
+    
+    # Assuming ingredients and instructions are stored as JSON strings in the database
+    ingredients = json.loads(row[2])
+    instructions = json.loads(row[3])
+    
+    return Recipe(
+        id=row[0],
+        name=row[1],
+        ingredients=ingredients,
+        instructions=instructions,
+        description=row[4],
+        cuisine_type=row[5],
+        prep_time=row[6],
+        cook_time=row[7],
+        total_time=row[8],
+        servings=row[9]
+    )
 
 def create_embeddings():
     """
@@ -27,11 +52,14 @@ def create_embeddings():
                 FOREIGN KEY (recipe_id) REFERENCES recipes_table(id)
             )
         ''')
-        conn.commit() # Commit table creation
+        conn.commit()
+
+        # Initialize the embedding model
+        model = QwenEmbeddingModel()
 
         # Fetch all recipe IDs from recipes_table
         cursor.execute("SELECT id FROM recipes_table")
-        all_recipe_ids = cursor.fetchall() # Returns a list of tuples, e.g., [(1,), (2,)]
+        all_recipe_ids = cursor.fetchall()
 
         for row in all_recipe_ids:
             recipe_id = row[0]
@@ -41,8 +69,12 @@ def create_embeddings():
             existing_embedding = cursor.fetchone()
 
             if existing_embedding is None:
-                # Generate a new embedding
-                embedding_vector = generate_random_embedding_vector()
+                # Create Recipe object from database data
+                recipe = create_recipe_from_db(cursor, recipe_id)
+                
+                # Generate embedding using the new function
+                embedding_vector = generate_embedding_vector(recipe, model)
+                
                 # Convert the embedding list to a JSON string
                 embedding_json = json.dumps(embedding_vector)
 
@@ -58,7 +90,7 @@ def create_embeddings():
 
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
-        if conn: # Rollback changes if an error occurs during transaction
+        if conn:
             conn.rollback()
     finally:
         if conn:
