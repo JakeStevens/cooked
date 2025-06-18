@@ -1,6 +1,6 @@
 import pytest
 from cooked.embedding_generator import EmbeddingModel, GeminiEmbeddingModel, format_recipe_text, generate_embedding_vector
-from types import Recipe
+from cooked.cooked_types import Recipe
 
 
 def test_format_recipe_text():

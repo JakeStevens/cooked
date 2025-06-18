@@ -2,7 +2,7 @@ from typing import List, Optional
 import json
 import os
 import openai
-from types import Recipe
+from cooked_types import Recipe
 
 
 class EmbeddingModel:

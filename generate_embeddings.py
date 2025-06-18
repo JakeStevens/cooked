@@ -1,6 +1,6 @@
 import sqlite3
 import json
-from types import Recipe
+from cooked_types import Recipe
 from embedding_generator import generate_embedding_vector, GeminiEmbeddingModel
 import openai
 import os
