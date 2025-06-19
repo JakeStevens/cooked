@@ -4,6 +4,14 @@ from cooked_types import Recipe
 from embedding_generator import generate_embedding_vector, GeminiEmbeddingModel
 import openai
 import os
+import logging
+import time
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 
 def generate_recipe_overview(recipe: Recipe, client) -> str:
     """Generate a comprehensive overview for a recipe using LLM."""
@@ -102,6 +110,8 @@ def create_embeddings():
     db_name = 'recipes.db'
     conn = None
     new_embeddings_count = 0
+    max_retries = 5
+    retry_delay = 5  # seconds
 
     try:
         conn = sqlite3.connect(db_name)
@@ -132,24 +142,53 @@ def create_embeddings():
         cursor.execute("SELECT id FROM recipes_table")
         all_recipe_ids = cursor.fetchall()
 
-        for row in all_recipe_ids:
-            recipe_id = row[0]
+        for i, row in enumerate(all_recipe_ids):
+            try:
+                logging.info(f"Processing recipe {i+1} of {len(all_recipe_ids)} (ID: {row[0]})")
+                recipe_id = row[0]
 
-            # Check if the recipe_id already exists in recipe_embeddings_table
-            cursor.execute("SELECT recipe_id FROM recipe_embeddings_table WHERE recipe_id = ?", (recipe_id,))
-            existing_embedding = cursor.fetchone()
+                # Check if the recipe_id already exists in recipe_embeddings_table
+                cursor.execute("SELECT recipe_id FROM recipe_embeddings_table WHERE recipe_id = ?", (recipe_id,))
+                existing_embedding = cursor.fetchone()
 
-            if existing_embedding is None:
+                if existing_embedding is not None:
+                    logging.info(f"Embedding already exists for recipe_id {recipe_id}.")
+                    continue
+
                 # Create Recipe object from database data
                 recipe = create_recipe_from_db(cursor, recipe_id)
-                
-                # Generate overview using Gemini
-                overview = generate_recipe_overview(recipe, client)
-                
+
+                # Generate overview using Gemini, with retry logic
+                overview = None
+                for attempt in range(max_retries):
+                    try:
+                        overview = generate_recipe_overview(recipe, client)
+                        break
+                    except Exception as e:
+                        if hasattr(e, 'status_code') and e.status_code == 503:
+                            logging.warning(f"Model overloaded (503) for recipe_id {recipe_id}, retrying in {retry_delay} seconds...")
+                            time.sleep(retry_delay)
+                        else:
+                            logging.error(f"Error generating overview for recipe_id {recipe_id}: {e}")
+                            break
+                if overview is None:
+                    logging.error(f"Failed to generate overview for recipe_id {recipe_id} after {max_retries} attempts. Skipping.")
+                    continue
+
                 # Generate embedding using the recipe text with overview
                 recipe_text = format_recipe_text_with_overview(recipe, overview)
-                embedding_vector = model.generate_embedding(recipe_text)
-                
+                embedding_vector = None
+                for attempt in range(max_retries):
+                    try:
+                        embedding_vector = model.generate_embedding(recipe_text)
+                        break
+                    except Exception as e:
+                        logging.warning(f"Error generating embedding for recipe_id {recipe_id}, attempt {attempt+1}/{max_retries}: {e}")
+                        time.sleep(retry_delay)
+                if embedding_vector is None:
+                    logging.error(f"Failed to generate embedding for recipe_id {recipe_id} after {max_retries} attempts. Skipping.")
+                    continue
+
                 # Convert the embedding list to a JSON string
                 embedding_json = json.dumps(embedding_vector)
 
@@ -158,15 +197,31 @@ def create_embeddings():
                     INSERT INTO recipe_embeddings_table (recipe_id, embedding_vector)
                     VALUES (?, ?)
                 ''', (recipe_id, embedding_json))
+                conn.commit()  # Commit after each successful insert
                 new_embeddings_count += 1
+                logging.info(f"Embedding generated and stored for recipe_id {recipe_id}.")
+            except KeyboardInterrupt:
+                logging.warning("Process interrupted by user. Saving progress and exiting...")
+                if conn:
+                    conn.commit()
+                    conn.close()
+                exit(0)
+            except Exception as e:
+                logging.error(f"Unexpected error for recipe_id {row[0]}: {e}")
+                continue
 
-        conn.commit()
-        print(f"Generated and added {new_embeddings_count} new embeddings to 'recipe_embeddings_table'.")
+        logging.info(f"Generated and added {new_embeddings_count} new embeddings to 'recipe_embeddings_table'.")
 
     except sqlite3.Error as e:
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
         if conn:
             conn.rollback()
+    except KeyboardInterrupt:
+        logging.warning("Process interrupted by user. Saving progress and exiting...")
+        if conn:
+            conn.commit()
+            conn.close()
+        exit(0)
     finally:
         if conn:
             conn.close()
