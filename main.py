@@ -1,101 +1,456 @@
-from fastapi import FastAPI, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, render_template, request, jsonify, session
+import openai
 import os
-from dotenv import load_dotenv
-import io
-from PyPDF2 import PdfReader
-from PIL import Image
+from datetime import datetime
+import uuid
 
-load_dotenv()
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-change-this'  # Change this in production
 
-app = FastAPI(title="My API", version="1.0.0")
+# Configure Gemini (using OpenAI-compatible client)
+api_key = os.getenv('GEMINI_API_KEY') or os.getenv('OPENAI_API_KEY')
+if not api_key:
+    raise ValueError("GEMINI_API_KEY or OPENAI_API_KEY environment variable must be set")
 
-# CORS configuration for local development
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React default port
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",  # Backup React port
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI!", "environment": "development"}
-
-@app.get("/api/health")
-def health_check():
-    return {"status": "healthy", "service": "backend"}
-
-@app.post("/api/upload-pdf")
-async def upload_pdf(file: UploadFile):
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-    
-    try:
-        # Read the file content
-        content = await file.read()
-        
-        # Try to parse the PDF to validate it
-        pdf_file = io.BytesIO(content)
-        try:
-            PdfReader(pdf_file)
-            return {
-                "status": "success",
-                "message": "Valid PDF file uploaded",
-                "filename": file.filename
-            }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid PDF file")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error processing the file")
-    finally:
-        await file.close()
-
-@app.post("/api/upload-image")
-async def upload_image(file: UploadFile):
-    # List of allowed image extensions
-    allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-    
-    # Get file extension and convert to lowercase
-    file_ext = os.path.splitext(file.filename.lower())[1]
-    
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"File must be an image ({', '.join(allowed_extensions)})"
+class ChatBot:
+    def __init__(self):
+        self.model = "gemini-2.5-flash"  # Gemini model
+        self.client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
-    
-    try:
-        # Read the file content
-        content = await file.read()
         
-        # Try to open and validate the image
-        image_stream = io.BytesIO(content)
+    def get_response(self, message, conversation_history=None):
+        """Get response from Gemini API"""
         try:
-            with Image.open(image_stream) as img:
-                # Get image information
-                return {
-                    "status": "success",
-                    "message": "Valid image file uploaded",
-                    "filename": file.filename,
-                    "format": img.format,
-                    "mode": img.mode,
-                    "size": {"width": img.width, "height": img.height}
-                }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail="Invalid image file")
+            # Prepare messages for the API
+            messages = [
+                {"role": "system", "content": "You are Chef Remy, a passionate and knowledgeable French chef who loves helping people discover amazing recipes. You're enthusiastic, friendly, and speak with a slight French accent in your writing (using words like 'mon ami', 'magnifique', 'oui'). You help users decide on recipes by asking about their preferences, dietary restrictions, available ingredients, cooking skill level, and time constraints. You provide detailed recipe suggestions with cooking tips and encourage culinary creativity. Always stay in character as the helpful chef Remy!"}
+            ]
             
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Error processing the file")
-    finally:
-        await file.close()
+            # Add conversation history if provided
+            if conversation_history:
+                messages.extend(conversation_history)
+            
+            # Add the current user message
+            messages.append({"role": "user", "content": message})
+            
+            # Call Gemini API
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=500,
+                temperature=0.7,
+                stream=False
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            print(f"Error calling Gemini API: {str(e)}")
+            return "Sorry, I'm having trouble processing your request right now."
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
+# Initialize chatbot
+chatbot = ChatBot()
+
+@app.route('/')
+def home():
+    """Main chat interface"""
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+        session['conversation'] = []
+    
+    return render_template('chat.html')
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    """Handle chat messages"""
+    try:
+        data = request.get_json()
+        user_message = data.get('message', '').strip()
+        
+        if not user_message:
+            return jsonify({'error': 'Message cannot be empty'}), 400
+        
+        # Get conversation history from session
+        conversation_history = session.get('conversation', [])
+        
+        # Get bot response
+        bot_response = chatbot.get_response(user_message, conversation_history)
+        
+        # Update conversation history
+        conversation_history.append({"role": "user", "content": user_message})
+        conversation_history.append({"role": "assistant", "content": bot_response})
+        
+        # Keep only last 10 exchanges to manage token usage
+        if len(conversation_history) > 20:
+            conversation_history = conversation_history[-20:]
+        
+        session['conversation'] = conversation_history
+        
+        return jsonify({
+            'response': bot_response,
+            'timestamp': datetime.now().strftime('%H:%M')
+        })
+        
+    except Exception as e:
+        print(f"Error in chat endpoint: {str(e)}")
+        return jsonify({'error': 'An error occurred processing your message'}), 500
+
+@app.route('/clear', methods=['POST'])
+def clear_conversation():
+    """Clear conversation history"""
+    session['conversation'] = []
+    return jsonify({'status': 'cleared'})
+
+@app.route('/history')
+def get_history():
+    """Get conversation history"""
+    conversation = session.get('conversation', [])
+    return jsonify({'conversation': conversation})
+
+# HTML Template (save this as templates/chat.html)
+chat_html = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            width: 800px;
+            height: 600px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            font-weight: 300;
+        }
+
+        .clear-btn {
+            position: absolute;
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .clear-btn:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 20px;
+            position: relative;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e1e8ed;
+            border-bottom-left-radius: 5px;
+        }
+
+        .message-time {
+            font-size: 12px;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+
+        .chat-input {
+            padding: 20px;
+            border-top: 1px solid #e1e8ed;
+            background: white;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .message-input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #e1e8ed;
+            border-radius: 25px;
+            outline: none;
+            font-size: 14px;
+        }
+
+        .message-input:focus {
+            border-color: #ff6b6b;
+        }
+
+        .send-btn {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: transform 0.2s;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .typing-indicator .message-content {
+            background: white;
+            border: 1px solid #e1e8ed;
+            padding: 12px 16px;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dots span {
+            width: 8px;
+            height: 8px;
+            background: #ff6b6b;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-10px);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>👨‍🍳 Chef Remy's Kitchen</h1>
+            <button class="clear-btn" onclick="clearConversation()">New Recipe</button>
+        </div>
+        
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot">
+                <div class="message-content">
+                    Bonjour, mon ami! 👨‍🍳 I am Chef Remy, and I'm absolutely delighted to help you discover the perfect recipe today! Whether you're looking for something quick and simple or a magnificent culinary adventure, I'm here to guide you. 
+                    <br><br>
+                    Tell me, what are you in the mood for? Perhaps something savory or sweet? And do you have any ingredients you'd like to use, or any dietary preferences I should know about?
+                    <div class="message-time" id="currentTime"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="typing-indicator" id="typingIndicator">
+            <div class="message-content">
+                <div class="typing-dots">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="chat-input">
+            <div class="input-group">
+                <input type="text" id="messageInput" class="message-input" 
+                       placeholder="Tell Chef Remy what you'd like to cook..." onkeypress="handleKeyPress(event)">
+                <button id="sendBtn" class="send-btn" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Set current time for initial message
+        document.getElementById('currentTime').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            // Add user message to chat
+            addMessage(message, 'user');
+            input.value = '';
+            
+            // Disable send button and show typing indicator
+            const sendBtn = document.getElementById('sendBtn');
+            sendBtn.disabled = true;
+            showTypingIndicator();
+            
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ message: message })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    addMessage(data.response, 'bot', data.timestamp);
+                } else {
+                    addMessage('Sorry, there was an error processing your message.', 'bot');
+                }
+            } catch (error) {
+                addMessage('Sorry, there was a connection error.', 'bot');
+            }
+            
+            // Hide typing indicator and re-enable send button
+            hideTypingIndicator();
+            sendBtn.disabled = false;
+        }
+
+        function addMessage(content, sender, timestamp = null) {
+            const messagesContainer = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+            
+            const time = timestamp || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            
+            messageDiv.innerHTML = `
+                <div class="message-content">
+                    ${content}
+                    <div class="message-time">${time}</div>
+                </div>
+            `;
+            
+            messagesContainer.appendChild(messageDiv);
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function showTypingIndicator() {
+            document.getElementById('typingIndicator').style.display = 'flex';
+            const messagesContainer = document.getElementById('chatMessages');
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function hideTypingIndicator() {
+            document.getElementById('typingIndicator').style.display = 'none';
+        }
+
+        async function clearConversation() {
+            try {
+                await fetch('/clear', { method: 'POST' });
+                const messagesContainer = document.getElementById('chatMessages');
+                messagesContainer.innerHTML = `
+                    <div class="message bot">
+                        <div class="message-content">
+                            Bonjour, mon ami! 👨‍🍳 I am Chef Remy, and I'm absolutely delighted to help you discover the perfect recipe today! Whether you're looking for something quick and simple or a magnificent culinary adventure, I'm here to guide you. 
+                            <br><br>
+                            Tell me, what are you in the mood for? Perhaps something savory or sweet? And do you have any ingredients you'd like to use, or any dietary preferences I should know about?
+                            <div class="message-time">${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Error clearing conversation:', error);
+            }
+        }
+    </script>
+</body>
+</html>
+'''
+
+# Create templates directory and save HTML file
+import os
+if not os.path.exists('templates'):
+    os.makedirs('templates')
+
+with open('templates/chat.html', 'w') as f:
+    f.write(chat_html)
+
+if __name__ == '__main__':   
+    app.run(debug=True)
