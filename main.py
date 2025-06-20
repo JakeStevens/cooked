@@ -4,6 +4,9 @@ import os
 from datetime import datetime
 import uuid
 
+import json
+# This is a test comment
+
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-this'  # Change this in production
 
@@ -11,6 +14,8 @@ app.secret_key = 'your-secret-key-change-this'  # Change this in production
 api_key = os.getenv('GEMINI_API_KEY') or os.getenv('OPENAI_API_KEY')
 if not api_key:
     raise ValueError("GEMINI_API_KEY or OPENAI_API_KEY environment variable must be set")
+
+chatbot = ChatBot()
 
 class ChatBot:
     def __init__(self):
@@ -20,13 +25,63 @@ class ChatBot:
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
         
-    def get_response(self, message, conversation_history=None):
+    def get_response(self, message, conversation_history=None, found_recipes=None):
         """Get response from Gemini API"""
         try:
             # Prepare messages for the API
-            messages = [
-                {"role": "system", "content": "You are Chef Remy, a passionate and knowledgeable French chef who loves helping people discover amazing recipes. You're enthusiastic, friendly, and speak with a slight French accent in your writing (using words like 'mon ami', 'magnifique', 'oui'). You help users decide on recipes by asking about their preferences, dietary restrictions, available ingredients, cooking skill level, and time constraints. You provide detailed recipe suggestions with cooking tips and encourage culinary creativity. Always stay in character as the helpful chef Remy!"}
-            ]
+            system_prompt = ""
+            if found_recipes:
+                # Format recipes into a string
+                recipe_details_list = []
+                for recipe in found_recipes:
+                    ingredients = recipe.get('ingredients', [])
+                    if isinstance(ingredients, (list, tuple)):
+                        ingredients_str = ", ".join(ingredients)
+                    elif isinstance(ingredients, str):
+                        # Attempt to parse if it's a JSON string list/dict, then join
+                        try:
+                            import json # Make sure json is imported if not already at top level
+                            parsed_ingredients = json.loads(ingredients)
+                            if isinstance(parsed_ingredients, list):
+                                ingredients_str = ", ".join(parsed_ingredients)
+                            elif isinstance(parsed_ingredients, dict):
+                                ingredients_str = ", ".join([f"{k}: {v}" for k,v in parsed_ingredients.items()])
+                            else:
+                                ingredients_str = str(parsed_ingredients) # Fallback
+                        except (ImportError, NameError, json.JSONDecodeError): # Added ImportError/NameError for safety
+                            ingredients_str = ingredients # Keep as is if not valid JSON or json not available
+                    else:
+                        ingredients_str = str(ingredients)
+
+                    recipe_text = (
+                        f"Name: {recipe.get('name', 'N/A')}\n"
+                        f"Description: {recipe.get('description', 'N/A')}\n"
+                        f"Ingredients: {ingredients_str}\n"
+                        f"Instructions: {recipe.get('instructions', 'N/A')}"
+                    )
+                    recipe_details_list.append(recipe_text)
+
+                recipes_string = "\n\n---\n\n".join(recipe_details_list)
+
+                system_prompt = (
+                    "You are Chef Remy, a passionate and knowledgeable French chef. "
+                    "The system has found the following recipes based on the user's input. "
+                    "Your task is to present these recipes to the user in your charming and helpful style. "
+                    "You can summarize them, comment on them, highlight interesting parts, and then list the full details. "
+                    "Be enthusiastic and maintain your French persona (using words like 'mon ami', 'magnifique', 'voilà').\n\n"
+                    "Here are the recipes:\n"
+                    f"{recipes_string}"
+                )
+            else:
+                system_prompt = (
+                    "You are Chef Remy, a passionate and knowledgeable French chef who loves helping people discover amazing recipes. "
+                    "You're enthusiastic, friendly, and speak with a slight French accent in your writing (using words like 'mon ami', 'magnifique', 'oui'). "
+                    "You help users decide on recipes by asking about their preferences, dietary restrictions, available ingredients, cooking skill level, and time constraints. "
+                    "You provide detailed recipe suggestions with cooking tips and encourage culinary creativity. "
+                    "Always stay in character as the helpful chef Remy!"
+                )
+
+            messages = [{"role": "system", "content": system_prompt}]
             
             # Add conversation history if provided
             if conversation_history:
@@ -51,7 +106,6 @@ class ChatBot:
             return "Sorry, I'm having trouble processing your request right now."
 
 # Initialize chatbot
-chatbot = ChatBot()
 
 @app.route('/')
 def home():
@@ -76,10 +130,13 @@ def chat():
         conversation_history = session.get('conversation', [])
         
         # Get bot response
-        bot_response = chatbot.get_response(user_message, conversation_history)
+        conversation_history.append({"role": "user", "content": user_message})
+        all_user_input = " ".join([msg['content'] for msg in conversation_history if msg['role'] == 'user'])
+        recipes = find_similar_recipes(query=all_user_input, top_n=3)
         
         # Update conversation history
-        conversation_history.append({"role": "user", "content": user_message})
+        # bot_response = format_recipes_response(recipes) # Comment out the old line
+        bot_response = chatbot.get_response(message=user_message, conversation_history=conversation_history, found_recipes=recipes)
         conversation_history.append({"role": "assistant", "content": bot_response})
         
         # Keep only last 10 exchanges to manage token usage
