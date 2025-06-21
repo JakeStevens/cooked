@@ -1,3 +1,4 @@
+from query_recipe import find_similar_recipes
 from flask import Flask, render_template, request, jsonify, session
 import openai
 import os
@@ -14,8 +15,6 @@ app.secret_key = 'your-secret-key-change-this'  # Change this in production
 api_key = os.getenv('GEMINI_API_KEY') or os.getenv('OPENAI_API_KEY')
 if not api_key:
     raise ValueError("GEMINI_API_KEY or OPENAI_API_KEY environment variable must be set")
-
-chatbot = ChatBot()
 
 class ChatBot:
     def __init__(self):
@@ -67,7 +66,7 @@ class ChatBot:
                     "You are Chef Remy, a passionate and knowledgeable French chef. "
                     "The system has found the following recipes based on the user's input. "
                     "Your task is to present these recipes to the user in your charming and helpful style. "
-                    "You can summarize them, comment on them, highlight interesting parts, and then list the full details. "
+                    "Return them in a list format, with the recipe name bolded, followed by a colon and a colorful short description of the recipe. "
                     "Be enthusiastic and maintain your French persona (using words like 'mon ami', 'magnifique', 'voilà').\n\n"
                     "Here are the recipes:\n"
                     f"{recipes_string}"
@@ -94,7 +93,7 @@ class ChatBot:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=500,
+                max_tokens=5000,
                 temperature=0.7,
                 stream=False
             )
@@ -106,6 +105,7 @@ class ChatBot:
             return "Sorry, I'm having trouble processing your request right now."
 
 # Initialize chatbot
+chatbot = ChatBot()
 
 @app.route('/')
 def home():
@@ -174,6 +174,7 @@ chat_html = '''
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Chatbot</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -361,6 +362,24 @@ chat_html = '''
                 transform: translateY(-10px);
             }
         }
+
+        /* Markdown styling */
+        .message.bot .message-content strong {
+            font-weight: bold;
+        }
+
+        .message.bot .message-content em {
+            font-style: italic;
+        }
+
+        .message.bot .message-content ul {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+
+        .message.bot .message-content li {
+            margin: 5px 0;
+        }
     </style>
 </head>
 <body>
@@ -401,6 +420,12 @@ chat_html = '''
     </div>
 
     <script>
+        // Configure marked for safe HTML rendering
+        marked.setOptions({
+            breaks: true,
+            gfm: true
+        });
+
         // Set current time for initial message
         document.getElementById('currentTime').textContent = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         
@@ -457,9 +482,15 @@ chat_html = '''
             
             const time = timestamp || new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
             
+            // Render markdown for bot messages
+            let renderedContent = content;
+            if (sender === 'bot') {
+                renderedContent = marked.parse(content);
+            }
+            
             messageDiv.innerHTML = `
                 <div class="message-content">
-                    ${content}
+                    ${renderedContent}
                     <div class="message-time">${time}</div>
                 </div>
             `;
