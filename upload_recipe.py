@@ -6,14 +6,15 @@ from typing import Dict, Any, Optional
 import openai
 from PIL import Image
 import io
+from cooked_types import Recipe
 
 def encode_image_to_base64(image_path: str) -> str:
     """Convert image to base64 string for API transmission."""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def parse_recipe_from_image(image_path: str) -> Dict[str, Any]:
-    """Parse recipe from image using Gemini Vision API."""
+def parse_recipe_from_image(image_path: str) -> Recipe:
+    """Parse recipe from image using Gemini Vision API and return a Recipe object."""
     # Initialize Gemini client
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -76,21 +77,31 @@ def parse_recipe_from_image(image_path: str) -> Dict[str, Any]:
         elif content.startswith("```") and content.endswith("```"):
             content = content[len("```"):-len("```")]
         
-        parsed_recipe = json.loads(content)
-        return parsed_recipe
+        parsed_data = json.loads(content)
+        
+        # Create Recipe object
+        recipe = Recipe(
+            id=0,  # Will be set by database
+            name=parsed_data['name'],
+            ingredients=parsed_data['ingredients'],
+            instructions=parsed_data['instructions'],
+            description=parsed_data.get('description'),
+            cuisine_type=parsed_data.get('cuisine_type'),
+            prep_time=parsed_data.get('prep_time'),
+            cook_time=parsed_data.get('cook_time'),
+            total_time=parsed_data.get('total_time'),
+            servings=parsed_data.get('servings'),
+            source=parsed_data.get('source', 'image_upload')
+        )
+        
+        return recipe
     except json.JSONDecodeError as e:
         print(f"Error parsing Gemini response: {e}")
         print(f"Raw response: {response.choices[0].message.content}")
         raise
 
-def store_recipe_in_database(recipe_data: Dict[str, Any], dry_run: bool = False) -> Optional[int]:
-    """Store the parsed recipe data in the SQLite database."""
-    if dry_run:
-        print("=== DRY RUN - Recipe Data ===")
-        print(json.dumps(recipe_data, indent=2))
-        print("=== End Recipe Data ===")
-        return None
-    
+def store_recipe_in_database(recipe: Recipe) -> int:
+    """Store a Recipe object in the SQLite database and return the recipe ID."""
     db_name = 'recipes.db'
     conn = None
     try:
@@ -98,8 +109,8 @@ def store_recipe_in_database(recipe_data: Dict[str, Any], dry_run: bool = False)
         cursor = conn.cursor()
 
         # Convert lists to JSON strings for storage
-        ingredients_json = json.dumps(recipe_data['ingredients'])
-        instructions_json = json.dumps(recipe_data['instructions'])
+        ingredients_json = json.dumps(recipe.ingredients)
+        instructions_json = json.dumps(recipe.instructions)
 
         cursor.execute('''
             INSERT INTO recipes_table (
@@ -109,21 +120,21 @@ def store_recipe_in_database(recipe_data: Dict[str, Any], dry_run: bool = False)
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            recipe_data['name'],
+            recipe.name,
             ingredients_json,
             instructions_json,
-            recipe_data['description'],
-            recipe_data['cuisine_type'],
-            recipe_data['prep_time'],
-            recipe_data['cook_time'],
-            recipe_data['total_time'],
-            recipe_data['servings'],
-            recipe_data['source']
+            recipe.description,
+            recipe.cuisine_type,
+            recipe.prep_time,
+            recipe.cook_time,
+            recipe.total_time,
+            recipe.servings,
+            recipe.source
         ))
         
         recipe_id = cursor.lastrowid
         conn.commit()
-        print(f"Recipe '{recipe_data['name']}' stored with ID: {recipe_id}")
+        print(f"Recipe '{recipe.name}' stored with ID: {recipe_id}")
         return recipe_id
 
     except Exception as e:
@@ -135,7 +146,7 @@ def store_recipe_in_database(recipe_data: Dict[str, Any], dry_run: bool = False)
         if conn:
             conn.close()
 
-def upload_recipe_from_image(image_path: str, dry_run: bool = False) -> Optional[int]:
+def upload_recipe_from_image(image_path: str, dry_run: bool = False) -> Optional[Recipe]:
     """
     Main function to upload a recipe from an image.
     
@@ -144,7 +155,7 @@ def upload_recipe_from_image(image_path: str, dry_run: bool = False) -> Optional
         dry_run: If True, only parse and print the recipe without storing to database
         
     Returns:
-        The recipe ID if successful, None if failed or dry_run=True
+        The Recipe object if successful, None if failed
     """
     try:
         # Validate file exists and is an image
@@ -159,22 +170,33 @@ def upload_recipe_from_image(image_path: str, dry_run: bool = False) -> Optional
         print(f"Parsing recipe from image: {image_path}")
         
         # Parse recipe from image
-        recipe_data = parse_recipe_from_image(image_path)
-        
-        # Store in database (or just print if dry_run)
-        recipe_id = store_recipe_in_database(recipe_data, dry_run)
+        recipe = parse_recipe_from_image(image_path)
         
         if dry_run:
-            print(f"Dry run completed for recipe: {recipe_data['name']}")
+            print("=== DRY RUN - Recipe Data ===")
+            print(f"Name: {recipe.name}")
+            print(f"Ingredients: {recipe.ingredients}")
+            print(f"Instructions: {recipe.instructions}")
+            print(f"Description: {recipe.description}")
+            print(f"Cuisine Type: {recipe.cuisine_type}")
+            print(f"Prep Time: {recipe.prep_time} minutes")
+            print(f"Cook Time: {recipe.cook_time} minutes")
+            print(f"Total Time: {recipe.total_time} minutes")
+            print(f"Servings: {recipe.servings}")
+            print("=== End Recipe Data ===")
+            print(f"Dry run completed for recipe: {recipe.name}")
         else:
-            print(f"Successfully uploaded recipe: {recipe_data['name']}")
-        return recipe_id
+            # Store in database
+            recipe_id = store_recipe_in_database(recipe)
+            print(f"Successfully uploaded recipe: {recipe.name} with ID: {recipe_id}")
+        
+        return recipe
         
     except Exception as e:
         print(f"Error uploading recipe from image: {e}")
         return None
 
-def upload_recipe_from_image_data(image_data: bytes, filename: str, dry_run: bool = False) -> Optional[int]:
+def upload_recipe_from_image_data(image_data: bytes, filename: str, dry_run: bool = False) -> Optional[Recipe]:
     """
     Upload recipe from image data (useful for web uploads).
     
@@ -184,7 +206,7 @@ def upload_recipe_from_image_data(image_data: bytes, filename: str, dry_run: boo
         dry_run: If True, only parse and print the recipe without storing to database
         
     Returns:
-        The recipe ID if successful, None if failed or dry_run=True
+        The Recipe object if successful, None if failed
     """
     try:
         # Validate file extension
@@ -199,8 +221,8 @@ def upload_recipe_from_image_data(image_data: bytes, filename: str, dry_run: boo
         
         try:
             # Parse and store recipe
-            recipe_id = upload_recipe_from_image(temp_path, dry_run)
-            return recipe_id
+            recipe = upload_recipe_from_image(temp_path, dry_run)
+            return recipe
         finally:
             # Clean up temporary file
             if os.path.exists(temp_path):
@@ -219,9 +241,10 @@ if __name__ == "__main__":
         sys.exit(1)
     
     image_path = sys.argv[1]
-    recipe_id = upload_recipe_from_image(image_path, dry_run=True)
+    recipe = upload_recipe_from_image(image_path, dry_run=True)
     
-    if recipe_id:
-        print(f"Recipe uploaded successfully with ID: {recipe_id}")
+    if recipe:
+        print(f"Recipe parsing completed (dry run mode)")
     else:
-        print("Recipe parsing completed (dry run mode)") 
+        print("Failed to parse recipe")
+        sys.exit(1) 

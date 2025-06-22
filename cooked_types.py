@@ -12,4 +12,5 @@ class Recipe:
     prep_time: Optional[int] = None
     cook_time: Optional[int] = None
     total_time: Optional[int] = None
-    servings: Optional[int] = None 
+    servings: Optional[int] = None
+    source: Optional[str] = None 

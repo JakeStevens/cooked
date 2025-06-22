@@ -4,6 +4,9 @@ import openai
 import os
 from datetime import datetime
 import uuid
+from upload_recipe import upload_recipe_from_image_data, parse_recipe_from_image
+from cooked_types import Recipe
+import tempfile
 
 import json
 # This is a test comment
@@ -109,12 +112,116 @@ chatbot = ChatBot()
 
 @app.route('/')
 def home():
-    """Main chat interface"""
+    """Main entry point with two buttons"""
+    return render_template('index.html')
+
+@app.route('/chat')
+def chat_page():
+    """Chat interface page"""
     if 'session_id' not in session:
         session['session_id'] = str(uuid.uuid4())
         session['conversation'] = []
     
     return render_template('chat.html')
+
+@app.route('/upload')
+def upload_page():
+    """Upload recipe page"""
+    return render_template('upload.html')
+
+@app.route('/upload_recipe', methods=['POST'])
+def upload_recipe():
+    """Handle recipe image upload and parsing"""
+    try:
+        if 'image' not in request.files:
+            return jsonify({'success': False, 'error': 'No image file provided'}), 400
+        
+        file = request.files['image']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        
+        # Check file extension
+        allowed_extensions = {'.png', '.jpg', '.jpeg'}
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in allowed_extensions:
+            return jsonify({'success': False, 'error': 'Invalid file type. Only PNG, JPG, and JPEG are allowed'}), 400
+        
+        # Read file data
+        image_data = file.read()
+        
+        # Parse recipe from image
+        recipe = upload_recipe_from_image_data(image_data, file.filename, dry_run=True)
+        
+        if recipe:
+            # Convert Recipe object to dictionary for JSON response
+            recipe_dict = {
+                'name': recipe.name,
+                'description': recipe.description,
+                'cuisine_type': recipe.cuisine_type,
+                'ingredients': recipe.ingredients,
+                'instructions': recipe.instructions,
+                'prep_time': recipe.prep_time,
+                'cook_time': recipe.cook_time,
+                'total_time': recipe.total_time,
+                'servings': recipe.servings,
+                'source': recipe.source
+            }
+            
+            return jsonify({
+                'success': True,
+                'recipe': recipe_dict
+            })
+        else:
+            return jsonify({'success': False, 'error': 'Failed to parse recipe from image'}), 400
+            
+    except Exception as e:
+        print(f"Error in upload_recipe endpoint: {str(e)}")
+        return jsonify({'success': False, 'error': 'An error occurred while processing the image'}), 500
+
+@app.route('/save_recipe', methods=['POST'])
+def save_recipe():
+    """Save the edited recipe to database"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('name'):
+            return jsonify({'success': False, 'error': 'Recipe name is required'}), 400
+        
+        if not data.get('ingredients') or len(data['ingredients']) == 0:
+            return jsonify({'success': False, 'error': 'At least one ingredient is required'}), 400
+        
+        if not data.get('instructions') or len(data['instructions']) == 0:
+            return jsonify({'success': False, 'error': 'At least one instruction is required'}), 400
+        
+        # Create Recipe object
+        recipe = Recipe(
+            id=0,  # Will be set by database
+            name=data['name'],
+            ingredients=data['ingredients'],
+            instructions=data['instructions'],
+            description=data.get('description'),
+            cuisine_type=data.get('cuisine_type'),
+            prep_time=data.get('prep_time'),
+            cook_time=data.get('cook_time'),
+            total_time=data.get('total_time'),
+            servings=data.get('servings'),
+            source="web_upload"  # Add source field for web uploads
+        )
+        
+        # Store in database
+        from upload_recipe import store_recipe_in_database
+        recipe_id = store_recipe_in_database(recipe)
+        
+        return jsonify({
+            'success': True,
+            'recipe_id': recipe_id,
+            'message': 'Recipe saved successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error in save_recipe endpoint: {str(e)}")
+        return jsonify({'success': False, 'error': 'An error occurred while saving the recipe'}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat():
